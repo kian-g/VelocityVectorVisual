@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Velocity Vector</title>
+  <!-- math.js for parsing and symbolic differentiation -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+  <style>
+    /* Basic reset and modern styling */
+    body, html {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f7f7f7;
+    }
+    #container {
+      max-width: 850px;
+      margin: 20px auto;
+      padding: 20px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    #controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 15px;
+      margin-bottom: 10px;
+    }
+    #controls > div {
+      margin: 5px;
+    }
+    #controls label {
+      margin-right: 5px;
+    }
+    input[type="text"],
+    select {
+      padding: 6px;
+      font-size: 1em;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      padding: 8px 12px;
+      font-size: 1em;
+      border: none;
+      border-radius: 4px;
+      background-color: #28a745;
+      color: white;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #218838;
+    }
+    #error {
+      color: red;
+      text-align: center;
+    }
+    #result {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 1.1em;
+      color: #444;
+    }
+    #plotCanvas {
+      display: block;
+      margin: 20px auto;
+      background-color: #fafafa;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <h1>Interactive Velocity & Tangent Visualizer</h1>
+    <div id="controls">
+      <!-- Graph mode selection -->
+      <div>
+        <label>Graph Type:</label>
+        <input type="radio" name="graphType" id="modeSingle" value="single" checked>
+        <label for="modeSingle">y = f(x)</label>
+        <input type="radio" name="graphType" id="modeParametric" value="parametric">
+        <label for="modeParametric">Parametric (x(t), y(t))</label>
+      </div>
+      <!-- Single function input -->
+      <div id="singleFunctionDiv">
+        <label for="functionInput">Function f(x):</label>
+        <input type="text" id="functionInput" size="20" value="sin(x)">
+      </div>
+      <!-- Parametric function inputs (hidden by default) -->
+      <div id="parametricFunctionDiv" style="display:none;">
+        <label for="xFunctionInput">x(t):</label>
+        <input type="text" id="xFunctionInput" size="15" value="cos(t)">
+        <label for="yFunctionInput">y(t):</label>
+        <input type="text" id="yFunctionInput" size="15" value="sin(t)">
+      </div>
+      <!-- Variable selection (only for single function mode) -->
+      <div id="variableDiv">
+        <label for="varSelect">Variable:</label>
+        <select id="varSelect">
+          <option value="x" selected>x</option>
+          <option value="t">t</option>
+        </select>
+      </div>
+      <!-- Evaluation point / parameter value -->
+      <div>
+        <label id="pointLabel" for="pointInput">Point (x):</label>
+        <input type="text" id="pointInput" size="5" value="0">
+      </div>
+      <!-- Tangent line toggle -->
+      <div>
+        <input type="checkbox" id="tangentCheckbox" checked>
+        <label for="tangentCheckbox">Display Tangent Line</label>
+      </div>
+      <!-- Plot button -->
+      <div>
+        <button id="plotButton">Plot</button>
+      </div>
+    </div>
+    <div id="error"></div>
+    <div id="result"></div>
+    <canvas id="plotCanvas" width="600" height="600"></canvas>
+  </div>
+
+  <script>
+    // Get DOM elements
+    const functionInput = document.getElementById('functionInput');
+    const xFunctionInput = document.getElementById('xFunctionInput');
+    const yFunctionInput = document.getElementById('yFunctionInput');
+    const varSelect     = document.getElementById('varSelect');
+    const pointInput    = document.getElementById('pointInput');
+    const pointLabel    = document.getElementById('pointLabel');
+    const tangentCheckbox = document.getElementById('tangentCheckbox');
+    const plotButton    = document.getElementById('plotButton');
+    const errorPara     = document.getElementById('error');
+    const resultPara    = document.getElementById('result');
+    const canvas        = document.getElementById('plotCanvas');
+    const ctx           = canvas.getContext('2d');
+
+    // Global transformation variables (for canvas conversion)
+    let globalXMin = -10, globalXMax = 10;
+    let globalYMin = -10, globalYMax = 10;
+    // For dragging (only enabled in single function mode)
+    let currentPoint = 0;  // Represents x (or t) value from the text input
+    let isDragging   = false;
+    // Compiled functions & derivatives
+    let compiledSingle, derivativeSingle;
+    let compiledX, compiledY, derivativeX, derivativeY;
+    // Default domain for single function mode (x) and for parameter (t) in parametric mode
+    const domainDefault = { min: -10, max: 10 };
+
+    // Coordinate conversion functions
+    function toCanvasX(x, xMin, xMax) {
+      return (x - xMin) / (xMax - xMin) * canvas.width;
+    }
+    function toCanvasY(y, yMin, yMax) {
+      return canvas.height - (y - yMin) / (yMax - yMin) * canvas.height;
+    }
+    function fromCanvasX(cx, xMin, xMax) {
+      return xMin + (cx / canvas.width) * (xMax - xMin);
+    }
+
+    // "Nice" grid spacing helper
+    function getGridSpacing(range) {
+      let roughSpacing = range / 10;
+      let magnitude = Math.pow(10, Math.floor(Math.log10(roughSpacing)));
+      let normalized = roughSpacing / magnitude;
+      let gridSpacing;
+      if (normalized < 1.5) gridSpacing = 1;
+      else if (normalized < 3) gridSpacing = 2;
+      else if (normalized < 7) gridSpacing = 5;
+      else gridSpacing = 10;
+      return gridSpacing * magnitude;
+    }
+
+    // Draw grid lines with tick marks.
+    function drawGrid(xMin, xMax, yMin, yMax) {
+      ctx.save();
+      ctx.strokeStyle = "#eee";
+      ctx.lineWidth = 1;
+
+      // Vertical grid lines.
+      let spacingX = getGridSpacing(xMax - xMin);
+      let startX = Math.ceil(xMin / spacingX) * spacingX;
+      for (let x = startX; x <= xMax; x += spacingX) {
+        const cx = toCanvasX(x, xMin, xMax);
+        ctx.beginPath();
+        ctx.moveTo(cx, 0);
+        ctx.lineTo(cx, canvas.height);
+        ctx.stroke();
+        // Tick label (drawn near the x-axis if visible)
+        ctx.fillStyle = "#888";
+        ctx.font = "10px sans-serif";
+        let cy = toCanvasY(0, yMin, yMax);
+        ctx.fillText(x.toFixed(2), cx + 2, cy - 2);
+      }
+
+      // Horizontal grid lines.
+      let spacingY = getGridSpacing(yMax - yMin);
+      let startY = Math.ceil(yMin / spacingY) * spacingY;
+      for (let y = startY; y <= yMax; y += spacingY) {
+        const cy = toCanvasY(y, yMin, yMax);
+        ctx.beginPath();
+        ctx.moveTo(0, cy);
+        ctx.lineTo(canvas.width, cy);
+        ctx.stroke();
+        // Tick label.
+        ctx.fillStyle = "#888";
+        ctx.font = "10px sans-serif";
+        ctx.fillText(y.toFixed(2), 2, cy - 2);
+      }
+      ctx.restore();
+    }
+
+    // Draw axes (x=0 and y=0) if within view.
+    function drawAxes(xMin, xMax, yMin, yMax) {
+      ctx.save();
+      ctx.strokeStyle = "#aaa";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (yMin < 0 && yMax > 0) {
+        let cy = toCanvasY(0, yMin, yMax);
+        ctx.moveTo(0, cy);
+        ctx.lineTo(canvas.width, cy);
+      }
+      if (xMin < 0 && xMax > 0) {
+        let cx = toCanvasX(0, xMin, xMax);
+        ctx.moveTo(cx, 0);
+        ctx.lineTo(cx, canvas.height);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Draw an arrow (used for the velocity vector)
+    function drawArrow(x1, y1, x2, y2) {
+      const headLength = 10;
+      const dx = x2 - x1, dy = y2 - y1;
+      const angle = Math.atan2(dy, dx);
+      ctx.save();
+      ctx.strokeStyle = "red";
+      ctx.fillStyle = "red";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      // Draw arrowhead.
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - headLength * Math.cos(angle - Math.PI/6),
+                 y2 - headLength * Math.sin(angle - Math.PI/6));
+      ctx.lineTo(x2 - headLength * Math.cos(angle + Math.PI/6),
+                 y2 - headLength * Math.sin(angle + Math.PI/6));
+      ctx.lineTo(x2, y2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Update which input fields are shown based on the selected graph mode.
+    function updateMode() {
+      let mode = document.querySelector('input[name="graphType"]:checked').value;
+      if (mode === "single") {
+        document.getElementById("singleFunctionDiv").style.display = "block";
+        document.getElementById("parametricFunctionDiv").style.display = "none";
+        document.getElementById("variableDiv").style.display = "inline-block";
+        pointLabel.textContent = "Point (x):";
+      } else if (mode === "parametric") {
+        document.getElementById("singleFunctionDiv").style.display = "none";
+        document.getElementById("parametricFunctionDiv").style.display = "block";
+        document.getElementById("variableDiv").style.display = "none";
+        pointLabel.textContent = "Parameter t:";
+      }
+      updatePlot();
+    }
+    document.querySelectorAll('input[name="graphType"]').forEach(radio => {
+      radio.addEventListener('change', updateMode);
+    });
+
+    // Main plotting function. Branches according to the graph mode.
+    function updatePlot() {
+      errorPara.textContent = "";
+      resultPara.textContent = "";
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      let mode = document.querySelector('input[name="graphType"]:checked').value;
+      
+      if (mode === "single") {
+        // ---- SINGLE FUNCTION MODE: y = f(x) ----
+        let variable = varSelect.value;
+        let exprStr = functionInput.value.trim();
+        if (!isDragging) {
+          currentPoint = parseFloat(pointInput.value);
+        } else {
+          pointInput.value = currentPoint.toFixed(2);
+        }
+        if (isNaN(currentPoint)) {
+          errorPara.textContent = "Invalid point value.";
+          return;
+        }
+        try {
+          compiledSingle = math.compile(exprStr);
+          const derivativeNode = math.derivative(exprStr, variable);
+          derivativeSingle = derivativeNode.compile();
+        } catch (err) {
+          errorPara.textContent = "Error parsing function: " + err;
+          return;
+        }
+        // Sample the function over the default x-domain.
+        const samplePoints = 200;
+        let xs = [], ys = [];
+        let xMin = domainDefault.min, xMax = domainDefault.max;
+        for (let i = 0; i <= samplePoints; i++) {
+          let x = xMin + (i / samplePoints) * (xMax - xMin);
+          let scope = {}; scope[variable] = x;
+          try {
+            let y = compiledSingle.evaluate(scope);
+            if (typeof y === "number" && isFinite(y)) {
+              xs.push(x);
+              ys.push(y);
+            }
+          } catch (e) { }
+        }
+        if (ys.length === 0) {
+          errorPara.textContent = "Function produced no valid values.";
+          return;
+        }
+        let yMinSample = Math.min(...ys);
+        let yMaxSample = Math.max(...ys);
+        let margin = 0.1 * (yMaxSample - yMinSample || 1);
+        let yMin = yMinSample - margin, yMax = yMaxSample + margin;
+        globalXMin = xMin; globalXMax = xMax; globalYMin = yMin; globalYMax = yMax;
+        drawGrid(xMin, xMax, yMin, yMax);
+        drawAxes(xMin, xMax, yMin, yMax);
+        // Plot the function.
+        ctx.save();
+        ctx.strokeStyle = "blue";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i <= samplePoints; i++) {
+          let x = xMin + (i / samplePoints) * (xMax - xMin);
+          let scope = {}; scope[variable] = x;
+          let y;
+          try {
+            y = compiledSingle.evaluate(scope);
+            if (!isFinite(y)) continue;
+          } catch (e) { continue; }
+          let cx = toCanvasX(x, xMin, xMax);
+          let cy = toCanvasY(y, yMin, yMax);
+          if (!started) {
+            ctx.moveTo(cx, cy);
+            started = true;
+          } else {
+            ctx.lineTo(cx, cy);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+        // Evaluate function and derivative at the current point.
+        let scope = {}; scope[variable] = currentPoint;
+        let fVal, dVal;
+        try {
+          fVal = compiledSingle.evaluate(scope);
+          dVal = derivativeSingle.evaluate(scope);
+        } catch (err) {
+          errorPara.textContent = "Error evaluating function at the point.";
+          return;
+        }
+        resultPara.innerHTML = `<strong>At ${variable} = ${currentPoint.toFixed(2)}:</strong><br>
+                                f(${currentPoint.toFixed(2)}) = ${fVal.toFixed(4)}<br>
+                                f'(${currentPoint.toFixed(2)}) = ${dVal.toFixed(4)}<br>
+                                Velocity vector: [1, ${dVal.toFixed(4)}]`;
+        // Draw the evaluation point.
+        let ptCanvasX = toCanvasX(currentPoint, xMin, xMax);
+        let ptCanvasY = toCanvasY(fVal, yMin, yMax);
+        ctx.save();
+        ctx.fillStyle = "black";
+        ctx.beginPath();
+        ctx.arc(ptCanvasX, ptCanvasY, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+        // Draw the velocity vector arrow.
+        let dx = 1, dy = dVal;
+        let endX = currentPoint + dx, endY = fVal + dy;
+        let endCanvasX = toCanvasX(endX, xMin, xMax);
+        let endCanvasY = toCanvasY(endY, yMin, yMax);
+        drawArrow(ptCanvasX, ptCanvasY, endCanvasX, endCanvasY);
+        // Draw the full tangent line if enabled.
+        if (tangentCheckbox.checked) {
+          let tangentYAtXMin = fVal + dVal * (xMin - currentPoint);
+          let tangentYAtXMax = fVal + dVal * (xMax - currentPoint);
+          let pt1 = { x: toCanvasX(xMin, xMin, xMax), y: toCanvasY(tangentYAtXMin, yMin, yMax) };
+          let pt2 = { x: toCanvasX(xMax, xMin, xMax), y: toCanvasY(tangentYAtXMax, yMin, yMax) };
+          ctx.save();
+          ctx.strokeStyle = "orange";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([5, 5]);
+          ctx.beginPath();
+          ctx.moveTo(pt1.x, pt1.y);
+          ctx.lineTo(pt2.x, pt2.y);
+          ctx.stroke();
+          ctx.restore();
+        }
+      } else if (mode === "parametric") {
+        // ---- PARAMETRIC MODE: x = x(t), y = y(t) ----
+        // In this mode the parameter is t.
+        let xExpr = xFunctionInput.value.trim();
+        let yExpr = yFunctionInput.value.trim();
+        if (!isDragging) {
+          currentPoint = parseFloat(pointInput.value);
+        } else {
+          pointInput.value = currentPoint.toFixed(2);
+        }
+        if (isNaN(currentPoint)) {
+          errorPara.textContent = "Invalid parameter value.";
+          return;
+        }
+        try {
+          compiledX = math.compile(xExpr);
+          compiledY = math.compile(yExpr);
+          let dNodeX = math.derivative(xExpr, 't');
+          let dNodeY = math.derivative(yExpr, 't');
+          derivativeX = dNodeX.compile();
+          derivativeY = dNodeY.compile();
+        } catch (err) {
+          errorPara.textContent = "Error parsing parametric functions: " + err;
+          return;
+        }
+        // Use a fixed t-domain for sampling.
+        let tMin = -10, tMax = 10;
+        const samplePoints = 300;
+        let xs = [], ys = [];
+        for (let i = 0; i <= samplePoints; i++) {
+          let t = tMin + (i / samplePoints) * (tMax - tMin);
+          let scope = { t: t };
+          try {
+            let xVal = compiledX.evaluate(scope);
+            let yVal = compiledY.evaluate(scope);
+            if (typeof xVal === "number" && isFinite(xVal) &&
+                typeof yVal === "number" && isFinite(yVal)) {
+              xs.push(xVal);
+              ys.push(yVal);
+            }
+          } catch (e) { }
+        }
+        if (xs.length === 0 || ys.length === 0) {
+          errorPara.textContent = "Parametric functions produced no valid values.";
+          return;
+        }
+        let xMinSample = Math.min(...xs), xMaxSample = Math.max(...xs);
+        let yMinSample = Math.min(...ys), yMaxSample = Math.max(...ys);
+        let marginX = 0.1 * (xMaxSample - xMinSample || 1);
+        let marginY = 0.1 * (yMaxSample - yMinSample || 1);
+        let plotXMin = xMinSample - marginX, plotXMax = xMaxSample + marginX;
+        let plotYMin = yMinSample - marginY, plotYMax = yMaxSample + marginY;
+        globalXMin = plotXMin; globalXMax = plotXMax;
+        globalYMin = plotYMin; globalYMax = plotYMax;
+        drawGrid(plotXMin, plotXMax, plotYMin, plotYMax);
+        drawAxes(plotXMin, plotXMax, plotYMin, plotYMax);
+        // Plot the parametric curve.
+        ctx.save();
+        ctx.strokeStyle = "blue";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i <= samplePoints; i++) {
+          let t = tMin + (i / samplePoints) * (tMax - tMin);
+          let scope = { t: t };
+          let xVal, yVal;
+          try {
+            xVal = compiledX.evaluate(scope);
+            yVal = compiledY.evaluate(scope);
+            if (!isFinite(xVal) || !isFinite(yVal)) continue;
+          } catch (e) { continue; }
+          let cx = toCanvasX(xVal, plotXMin, plotXMax);
+          let cy = toCanvasY(yVal, plotYMin, plotYMax);
+          if (!started) {
+            ctx.moveTo(cx, cy);
+            started = true;
+          } else {
+            ctx.lineTo(cx, cy);
+          }
+        }
+        ctx.stroke();
+        ctx.restore();
+        // Evaluate at the current parameter value.
+        let scope = { t: currentPoint };
+        let x0, y0, vx, vy;
+        try {
+          x0 = compiledX.evaluate(scope);
+          y0 = compiledY.evaluate(scope);
+          vx = derivativeX.evaluate(scope);
+          vy = derivativeY.evaluate(scope);
+        } catch (err) {
+          errorPara.textContent = "Error evaluating parametric functions at t = " + currentPoint;
+          return;
+        }
+        resultPara.innerHTML = `<strong>At t = ${currentPoint.toFixed(2)}:</strong><br>
+                                x(t) = ${x0.toFixed(4)}, y(t) = ${y0.toFixed(4)}<br>
+                                x'(t) = ${vx.toFixed(4)}, y'(t) = ${vy.toFixed(4)}<br>
+                                Velocity vector: [${vx.toFixed(4)}, ${vy.toFixed(4)}]`;
+        // Draw the evaluation point.
+        let ptCanvasX = toCanvasX(x0, plotXMin, plotXMax);
+        let ptCanvasY = toCanvasY(y0, plotYMin, plotYMax);
+        ctx.save();
+        ctx.fillStyle = "black";
+        ctx.beginPath();
+        ctx.arc(ptCanvasX, ptCanvasY, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.restore();
+        // Draw the velocity vector arrow.
+        let endX = x0 + vx, endY = y0 + vy;
+        let endCanvasX = toCanvasX(endX, plotXMin, plotXMax);
+        let endCanvasY = toCanvasY(endY, plotYMin, plotYMax);
+        drawArrow(ptCanvasX, ptCanvasY, endCanvasX, endCanvasY);
+        // Draw the full tangent line if enabled.
+        if (tangentCheckbox.checked) {
+          // For the parametric curve, extend the tangent line in both directions.
+          let factor = 1000;
+          let p1 = { x: x0 - vx * factor, y: y0 - vy * factor };
+          let p2 = { x: x0 + vx * factor, y: y0 + vy * factor };
+          let cp1 = { x: toCanvasX(p1.x, plotXMin, plotXMax), y: toCanvasY(p1.y, plotYMin, plotYMax) };
+          let cp2 = { x: toCanvasX(p2.x, plotXMin, plotXMax), y: toCanvasY(p2.y, plotYMin, plotYMax) };
+          ctx.save();
+          ctx.strokeStyle = "orange";
+          ctx.lineWidth = 1;
+          ctx.setLineDash([5, 5]);
+          ctx.beginPath();
+          ctx.moveTo(cp1.x, cp1.y);
+          ctx.lineTo(cp2.x, cp2.y);
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    // Button to update/replot.
+    plotButton.addEventListener('click', updatePlot);
+
+    // ---- DRAGGING: Only enabled for single function mode ----
+    canvas.addEventListener('mousedown', (e) => {
+      let mode = document.querySelector('input[name="graphType"]:checked').value;
+      if (mode !== "single") return; // dragging only for single function mode
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      // Compute current evaluation point in canvas coordinates.
+      let variable = varSelect.value;
+      let scope = {}; scope[variable] = currentPoint;
+      let fVal;
+      try {
+        fVal = compiledSingle.evaluate(scope);
+      } catch (err) {
+        return;
+      }
+      const ptX = toCanvasX(currentPoint, domainDefault.min, domainDefault.max);
+      const ptY = toCanvasY(fVal, globalYMin, globalYMax);
+      const dist = Math.hypot(mouseX - ptX, mouseY - ptY);
+      if (dist < 10) {
+        isDragging = true;
+      }
+    });
+    canvas.addEventListener('mousemove', (e) => {
+      let mode = document.querySelector('input[name="graphType"]:checked').value;
+      if (isDragging && mode === "single") {
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        // Update current point using the x-domain (for single function mode, x maps directly).
+        currentPoint = fromCanvasX(mouseX, domainDefault.min, domainDefault.max);
+        pointInput.value = currentPoint.toFixed(2);
+        updatePlot();
+      }
+    });
+    canvas.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+    canvas.addEventListener('mouseleave', () => {
+      isDragging = false;
+    });
+
+    // Initial plot.
+    updatePlot();
+  </script>
+</body>
+</html>
